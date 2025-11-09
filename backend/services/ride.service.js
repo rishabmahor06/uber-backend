@@ -1,0 +1,164 @@
+const rideModel = require("../models/ride.model");
+const mapService = require("../services/maps.service");
+const crypto = require("crypto");
+
+async function getFare(pickup, destination) {
+  if (!pickup || !destination) {
+    throw new Error("Pickup and destinations are required ");
+  }
+
+  const distanceTime = await mapService.getDistanceTime(pickup, destination);
+
+  const baseFare = {
+    auto: 20,
+    car: 40,
+    motorcycle: 10,
+  };
+  const perKmRate = {
+    auto: 7,
+    car: 12,
+    motorcycle: 8,
+  };
+  const perMintRate = {
+    auto: 2,
+    car: 3,
+    motorcycle: 1.5,
+  };
+
+  const fare = {
+    auto: Math.round(
+      baseFare.auto +
+        (distanceTime.distance.value / 1000) * perKmRate.auto +
+        (distanceTime.duration.value / 60) * perMintRate.auto
+    ),
+    car: Math.round(
+      baseFare.car +
+        (distanceTime.distance.value / 1000) * perKmRate.car +
+        (distanceTime.duration.value / 60) * perMintRate.car
+    ),
+    motorcycle: Math.round(
+      baseFare.motorcycle +
+        (distanceTime.distance.value / 1000) * perKmRate.motorcycle +
+        (distanceTime.duration.value / 60) * perMintRate.motorcycle
+    ),
+    // Add moto alias for motorcycle fare for backwards compatibility
+    moto: Math.round(
+      baseFare.motorcycle +
+        (distanceTime.distance.value / 1000) * perKmRate.motorcycle +
+        (distanceTime.duration.value / 60) * perMintRate.motorcycle
+    ),
+  };
+
+  return fare;
+}
+
+module.exports.getFare = getFare;
+
+function getOtp(num) {
+  function generate(num) {
+    const otp = crypto
+      .randomInt(Math.pow(10, num - 1), Math.pow(10, num))
+      .toString();
+    return otp;
+  }
+
+  return generate(num);
+}
+
+module.exports.createRide = async ({
+  pickup,
+  destination,
+  vehicleType,
+  userId,
+}) => {
+  if (!pickup || !destination || !vehicleType || !userId) {
+    throw new Error(
+      "pickup, destination, vehicleType, and userId are required"
+    );
+  }
+
+  const fare = await getFare(pickup, destination);
+
+  if (!fare.hasOwnProperty(vehicleType)) {
+    throw new Error("invalid vehicle type");
+  }
+
+  const ride = await rideModel.create({
+    pickup,
+    destination,
+    otp: getOtp(6),
+    fare: fare[vehicleType],
+    vehicleType,
+    user: userId,
+  });
+
+  return ride;
+};
+
+module.exports.confirmRide = async (rideId, captain) => {
+  if (!rideId) {
+    throw new Error("rideId are required");
+  }
+  console.log("Captain confirming ride:", captain , rideId);
+
+  await rideModel.findOneAndUpdate(
+    { _id: rideId },
+    { status: "accepted", captain: captain._id }
+  );
+  const ride = await rideModel
+    .findOne({ _id: rideId  })
+    .populate("user")
+    .populate("captain")
+    .select("+otp");
+  if (!ride) {
+    throw new Error("Ride not found");
+  }
+
+  return ride;
+};
+
+module.exports.startRide = async (rideId, otp, captain) => {
+  if (!rideId || !otp) {
+    throw new Error("rideId and otp are required");
+  }
+  const ride = await rideModel
+    .findOne({ _id: rideId })
+    .populate("user")
+    .populate("captain")
+    .select("+otp");
+  if (!ride) {
+    throw new Error("Ride not found");
+  }
+  if (ride.status !== "accepted") {
+    throw new Error("Ride not accepted yet ");
+  }
+  if (ride.otp !== otp) {
+    throw new Error("Invalid OTP");
+  }
+
+  await rideModel.findOneAndUpdate({ _id: rideId }, { status: "ongoing" });
+  ride.status = "ongoing";
+  await ride.save();
+  return ride;
+};
+
+module.exports.endRide = async (rideId, captain) => {
+  if (!rideId) {
+    throw new Error("rideId is required");
+  }
+  const ride = await rideModel
+    .findOne({ _id: rideId, captain: captain._id })
+    .populate("user")
+    .populate("captain")
+    .select("+otp");
+  if (!ride) {
+    throw new Error("Ride not found");
+  }
+  if (ride.status !== "ongoing") {
+    throw new Error("Ride not started yet ");
+  }
+  await rideModel.findOneAndUpdate({ _id: rideId }, { status: "completed" });
+  ride.status = "completed";
+  await ride.save();
+  return ride;
+};
